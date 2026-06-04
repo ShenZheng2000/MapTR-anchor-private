@@ -19,7 +19,14 @@
 #     --work-dir work_dirs/maptrv2_mapchange_3d_r50_6ep
 
 # # # => train maptrv2 on geosplit (nuscenes)
+# bash ./tools/dist_train.sh \
+#     ./projects/configs/maptrv2/maptrv2_nusc_r50_24ep.py \
+#     8 \
+#     --work-dir work_dirs/maptrv2_nusc_r50_24ep
+
+# => train maptrv2 + FlexSceneEncoder (nuscenes)
+# NOTE: use 2 gpu for quick debug! 
 bash ./tools/dist_train.sh \
-    ./projects/configs/maptrv2/maptrv2_nusc_r50_24ep.py \
+    ./projects/configs/maptrv2/maptrv2_flex_nusc_r50_24ep.py \
     8 \
-    --work-dir work_dirs/maptrv2_nusc_r50_24ep
+    --work-dir work_dirs/maptrv2_flex_nusc_r50_24ep

@@ -69,6 +69,7 @@ class MapTRPerceptionTransformer(BaseModule):
             self.fuser = build_fuser(fuser) #TODO
         # self.use_attn_bev = encoder['type'] == 'BEVFormerEncoder'
         self.use_attn_bev = 'BEVFormerEncoder' in encoder['type']
+        self.use_flex = 'FlexSceneEncoder' in encoder['type']
         self.encoder = build_transformer_layer_sequence(encoder)
         self.decoder = build_transformer_layer_sequence(decoder)
         self.embed_dims = embed_dims
@@ -238,6 +239,12 @@ class MapTRPerceptionTransformer(BaseModule):
         )
         return ret_dict
 
+    def flex_bev_encode(self, mlvl_feats, **kwargs):
+        images = mlvl_feats[self.feat_down_sample_indice]   # (B, N, C, H, W)
+        img_metas = kwargs['img_metas']
+        out = self.encoder(images, img_metas)
+        return dict(bev=out['bev'], depth=out['depth'])     # bev: (B, K, C)
+
     def get_bev_features(
             self,
             mlvl_feats,
@@ -264,6 +271,10 @@ class MapTRPerceptionTransformer(BaseModule):
                 **kwargs)
             bev_embed = ret_dict['bev']
             depth = ret_dict['depth']
+        elif self.use_flex:
+            ret_dict = self.flex_bev_encode(mlvl_feats, **kwargs)
+            bev_embed = ret_dict['bev']       # (B, K, C) -- loose tokens
+            depth = ret_dict['depth']         # None
         else:
             ret_dict = self.lss_bev_encode(
                 mlvl_feats,
@@ -271,7 +282,7 @@ class MapTRPerceptionTransformer(BaseModule):
                 **kwargs)
             bev_embed = ret_dict['bev']
             depth = ret_dict['depth']
-        if lidar_feat is not None:
+        if lidar_feat is not None and not self.use_flex:
             bs = mlvl_feats[0].size(0)
             bev_embed = bev_embed.view(bs, bev_h, bev_w, -1).permute(0,3,1,2).contiguous()
             lidar_feat = lidar_feat.permute(0,1,3,2).contiguous() # B C H W
@@ -392,7 +403,7 @@ class MapTRPerceptionTransformer(BaseModule):
 
         inter_states, inter_references = self.decoder(
             query=query,
-            key=None,
+            key=bev_embed if self.use_flex else None,
             value=bev_embed,
             query_pos=query_pos,
             reference_points=reference_points,
