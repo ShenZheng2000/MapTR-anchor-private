@@ -77,14 +77,19 @@ class FlexSceneEncoder(BaseModule):
                  num_layers=8,
                  num_heads=8,
                  num_cams=6,
+                 num_timesteps=1,
                  ffn_ratio=4,
                  dropout=0.1,
                  feat_down_sample_indice=-1,
                  pool_stride=1,
+                 max_spatial_h=50,
+                 max_spatial_w=100,
                  **kwargs):
         super().__init__(**kwargs)
         self.embed_dims = embed_dims
         self.num_scene_tokens = num_scene_tokens
+        self.num_cams = num_cams
+        self.num_timesteps = num_timesteps
         self.feat_down_sample_indice = feat_down_sample_indice
         self.pool_stride = pool_stride
 
@@ -94,6 +99,15 @@ class FlexSceneEncoder(BaseModule):
         # learnable per-camera embedding, indexed by camera id
         self.cams_embeds = nn.Parameter(
             torch.randn(num_cams, embed_dims) * 0.02)
+        # learnable per-timestep embedding (PE_t^time in the paper, Sec. III-B)
+        self.times_embeds = nn.Parameter(
+            torch.randn(num_timesteps, embed_dims) * 0.02)
+        # factorized 2D spatial positional embedding (ViT-style, but for ResNet tokens)
+        # split embed_dims across H and W axes then concat: (H,C/2) x (W,C/2) -> (H*W,C)
+        self.spatial_embeds_h = nn.Parameter(
+            torch.randn(max_spatial_h, embed_dims // 2) * 0.02)
+        self.spatial_embeds_w = nn.Parameter(
+            torch.randn(max_spatial_w, embed_dims // 2) * 0.02)
 
         layer = _PreNormLayer(
             embed_dims=embed_dims,
@@ -107,10 +121,15 @@ class FlexSceneEncoder(BaseModule):
         self.out_norm = nn.LayerNorm(embed_dims)
 
     def forward(self, images, img_metas=None, **kwargs):
-        # images: (B, N_cam, C, H, W) -- single level feature map
+        # images: (B, N_cam*T, C, H, W) -- N_cam cameras, T timesteps stacked
         B, N, C, H, W = images.shape
         assert C == self.embed_dims, \
             f'feature channel {C} != embed_dims {self.embed_dims}'
+        assert N % self.num_cams == 0, \
+            f'N={N} must be divisible by num_cams={self.num_cams}'
+        T = N // self.num_cams
+        assert T <= self.num_timesteps, \
+            f'derived T={T} exceeds num_timesteps={self.num_timesteps}'
 
         # optional spatial pooling to reduce image token count
         if self.pool_stride > 1:
@@ -121,9 +140,24 @@ class FlexSceneEncoder(BaseModule):
 
         # flatten each image to tokens: (B, N, H*W, C)
         x = images.flatten(3).permute(0, 1, 3, 2).contiguous()
-        # add learnable camera embedding (broadcast over H*W tokens)
-        x = x + self.cams_embeds[None, :N, None, :].to(x.dtype)
-        # concat all views into one image-token sequence
+        # build factorized 2D spatial PE: concat(h_embed, w_embed) -> (H*W, C)
+        h_emb = self.spatial_embeds_h[:H, :]                 # (H, C/2)
+        w_emb = self.spatial_embeds_w[:W, :]                 # (W, C/2)
+        # outer product over H and W positions
+        spatial_pe = torch.cat([
+            h_emb[:, None, :].expand(H, W, -1),              # (H, W, C/2)
+            w_emb[None, :, :].expand(H, W, -1),              # (H, W, C/2)
+        ], dim=-1).reshape(H * W, C)                         # (H*W, C)
+
+        # reshape to (B, T, N_cam, H*W, C) to apply embeddings per axis
+        x = x.view(B, T, self.num_cams, H * W, C)
+        # add learnable camera embedding (PE_c^cam, broadcast over T and H*W)
+        x = x + self.cams_embeds[None, None, :, None, :].to(x.dtype)
+        # add learnable timestep embedding (PE_t^time, broadcast over N_cam and H*W)
+        x = x + self.times_embeds[None, :T, None, None, :].to(x.dtype)
+        # add 2D spatial PE (broadcast over B, T, N_cam)
+        x = x + spatial_pe[None, None, None, :, :].to(x.dtype)
+        # flatten back to one image-token sequence
         x = x.reshape(B, N * H * W, C)                       # (B, L_img, C)
 
         # prepend the K scene tokens  (Eq. 2: [S^(0); X])

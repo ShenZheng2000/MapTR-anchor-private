@@ -109,6 +109,7 @@ model = dict(
                 num_layers=4,
                 num_heads=8,
                 num_cams=6,
+                num_timesteps=queue_length,  # matches queue_length; extend for temporal stacking
                 ffn_ratio=4,
                 dropout=0.1,
                 pool_stride=2,  # halves H,W: 2100 img tokens -> ~504, seq 3000->1404
