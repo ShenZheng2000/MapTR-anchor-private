@@ -44,18 +44,22 @@ class _PreNormLayer(nn.Module):
 
 
 class _PreNormEncoder(nn.Module):
-    def __init__(self, layer, num_layers, use_checkpoint=True):
+    def __init__(self, layer, num_layers, use_checkpoint=True, tie_weights=False):
         super().__init__()
-        self.layers = nn.ModuleList(
-            [copy.deepcopy(layer) for _ in range(num_layers)])
+        self.num_layers = num_layers
         self.use_checkpoint = use_checkpoint
+        self.layers = nn.ModuleList(
+            [layer] if tie_weights else [copy.deepcopy(layer) for _ in range(num_layers)])
+
+    def _apply_layer(self, layer, x):
+        if self.use_checkpoint and x.requires_grad:
+            return checkpoint(layer, x)
+        return layer(x)
 
     def forward(self, x):
-        for layer in self.layers:
-            if self.use_checkpoint and x.requires_grad:
-                x = checkpoint(layer, x)
-            else:
-                x = layer(x)
+        layers = self.layers * self.num_layers if len(self.layers) == 1 else self.layers
+        for layer in layers:
+            x = self._apply_layer(layer, x)
         return x
 
 
@@ -72,18 +76,19 @@ class FlexSceneEncoder(BaseModule):
     """
 
     def __init__(self,
-                 num_scene_tokens=900,
+                 num_scene_tokens=1200,
                  embed_dims=256,
-                 num_layers=8,
+                 num_layers=4,
                  num_heads=8,
                  num_cams=6,
-                 num_timesteps=1,
+                 num_timesteps=4,  # total: current + 3 past
                  ffn_ratio=4,
                  dropout=0.1,
                  feat_down_sample_indice=-1,
                  pool_stride=1,
                  max_spatial_h=50,
                  max_spatial_w=100,
+                 tie_layer_weights=False,
                  **kwargs):
         super().__init__(**kwargs)
         self.embed_dims = embed_dims
@@ -115,7 +120,7 @@ class FlexSceneEncoder(BaseModule):
             ffn_dim=embed_dims * ffn_ratio,
             dropout=dropout,
         )
-        self.encoder = _PreNormEncoder(layer, num_layers)
+        self.encoder = _PreNormEncoder(layer, num_layers, tie_weights=tie_layer_weights)
         # pre-norm stacks don't normalize after the last layer; without this
         # the residual stream grows unbounded and produces NaN after ~tens of steps
         self.out_norm = nn.LayerNorm(embed_dims)
