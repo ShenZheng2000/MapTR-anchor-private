@@ -44,12 +44,28 @@ class _PreNormLayer(nn.Module):
 
 
 class _PreNormEncoder(nn.Module):
-    def __init__(self, layer, num_layers, use_checkpoint=True, tie_weights=False):
+    """Stack of pre-norm transformer encoder blocks.
+
+    Two modes controlled by tie_weights:
+      tie_weights=False  ->  num_layers independent blocks, each applied once.
+      tie_weights=True   ->  one shared block repeated N times (weight-tied).
+                             N = num_train_iters during training,
+                                 num_test_iters  during eval.
+                             Falls back to num_layers if those are not provided.
+    """
+
+    def __init__(self, layer, num_layers, use_checkpoint=True, tie_weights=False,
+                 num_train_iters=None, num_test_iters=None):
         super().__init__()
-        self.num_layers = num_layers
         self.use_checkpoint = use_checkpoint
+        self.tie_weights = tie_weights
+        # independent weights: one distinct block per layer
+        # tied weights: a single block that will be called multiple times
         self.layers = nn.ModuleList(
             [layer] if tie_weights else [copy.deepcopy(layer) for _ in range(num_layers)])
+        # repetition counts only used when tie_weights=True
+        self.num_train_iters = num_train_iters if num_train_iters is not None else num_layers
+        self.num_test_iters = num_test_iters if num_test_iters is not None else num_layers
 
     def _apply_layer(self, layer, x):
         if self.use_checkpoint and x.requires_grad:
@@ -57,8 +73,12 @@ class _PreNormEncoder(nn.Module):
         return layer(x)
 
     def forward(self, x):
-        layers = self.layers * self.num_layers if len(self.layers) == 1 else self.layers
-        for layer in layers:
+        if self.tie_weights:
+            n = self.num_train_iters if self.training else self.num_test_iters
+            apply_layers = self.layers * n   # repeat the single shared block n times
+        else:
+            apply_layers = self.layers       # run each independent block once
+        for layer in apply_layers:
             x = self._apply_layer(layer, x)
         return x
 
@@ -89,6 +109,8 @@ class FlexSceneEncoder(BaseModule):
                  max_spatial_h=50,
                  max_spatial_w=100,
                  tie_layer_weights=False,
+                 num_train_iters=4,
+                 num_test_iters=4,
                  **kwargs):
         super().__init__(**kwargs)
         self.embed_dims = embed_dims
@@ -120,7 +142,9 @@ class FlexSceneEncoder(BaseModule):
             ffn_dim=embed_dims * ffn_ratio,
             dropout=dropout,
         )
-        self.encoder = _PreNormEncoder(layer, num_layers, tie_weights=tie_layer_weights)
+        self.encoder = _PreNormEncoder(layer, num_layers, tie_weights=tie_layer_weights,
+                                       num_train_iters=num_train_iters,
+                                       num_test_iters=num_test_iters)
         # pre-norm stacks don't normalize after the last layer; without this
         # the residual stream grows unbounded and produces NaN after ~tens of steps
         self.out_norm = nn.LayerNorm(embed_dims)

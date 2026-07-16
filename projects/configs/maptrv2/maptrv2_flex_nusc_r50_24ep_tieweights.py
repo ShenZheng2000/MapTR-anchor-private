@@ -5,4 +5,6 @@ model = dict(
         transformer=dict(
             encoder=dict(
                 tie_layer_weights=True,
+                num_train_iters=4,
+                num_test_iters=4,
             ))))
